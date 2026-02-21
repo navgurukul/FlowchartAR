@@ -52,6 +52,14 @@ dependencies {
     // ARCore
     implementation("com.google.ar:core:1.41.0")
     
+    // CameraX
+    implementation("androidx.camera:camera-camera2:1.3.1")
+    implementation("androidx.camera:camera-lifecycle:1.3.1")
+    implementation("androidx.camera:camera-view:1.3.1")
+    
+    // Material Icons Extended
+    implementation("androidx.compose.material:material-icons-extended:1.5.4")
+    
     // Navigation
     implementation("androidx.navigation:navigation-compose:2.7.6")
     
