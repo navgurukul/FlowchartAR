@@ -32,7 +32,7 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
 import kotlinx.coroutines.delay
 import org.navgurukul.flowchartar.ar.ImageRecognizer
-import org.navgurukul.flowchartar.ar.Shape3DRenderer
+import org.navgurukul.flowchartar.ar.Simple3DShapeRenderer
 import java.util.concurrent.Executors
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -45,7 +45,7 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
     var isScanning by remember { mutableStateOf(true) }
     
     val imageRecognizer = remember { ImageRecognizer() }
-    val shapeRenderer = remember { Shape3DRenderer() }
+    val shapeRenderer = remember { Simple3DShapeRenderer() }
     val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
     
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -154,7 +154,7 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
                         val y = detected.y * height
                         val shapeSize = detected.width * width * 0.5f
                         
-                        shapeRenderer.drawShape(
+                        shapeRenderer.drawShape3D(
                             canvas,
                             detected.type,
                             x,
