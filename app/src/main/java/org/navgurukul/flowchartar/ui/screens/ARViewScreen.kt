@@ -1,17 +1,10 @@
 package org.navgurukul.flowchartar.ui.screens
 
 import android.Manifest
-import android.graphics.Bitmap
+import android.opengl.GLSurfaceView
 import android.util.Log
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
-import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
-import androidx.camera.core.ImageProxy
-import androidx.camera.core.Preview
-import androidx.camera.lifecycle.ProcessCameraProvider
-import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.*
 import androidx.compose.foundation.shape.RoundedCornerShape
@@ -22,31 +15,28 @@ import androidx.compose.runtime.*
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.viewinterop.AndroidView
-import androidx.core.content.ContextCompat
+import com.google.ar.core.*
+import com.google.ar.core.exceptions.CameraNotAvailableException
 import kotlinx.coroutines.delay
-import org.navgurukul.flowchartar.ar.ImageRecognizer
-import org.navgurukul.flowchartar.ar.Simple3DShapeRenderer
-import java.util.concurrent.Executors
+import org.navgurukul.flowchartar.ar.ARRenderer
+import javax.microedition.khronos.egl.EGLConfig
+import javax.microedition.khronos.opengles.GL10
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ARViewScreen(onBackPressed: () -> Unit) {
     val context = LocalContext.current
-    val lifecycleOwner = LocalLifecycleOwner.current
     var hasCameraPermission by remember { mutableStateOf(false) }
-    var detectedShapes by remember { mutableStateOf<List<org.navgurukul.flowchartar.ar.DetectedShape>>(emptyList()) }
-    var isScanning by remember { mutableStateOf(true) }
+    var detectedPlanes by remember { mutableStateOf(0) }
+    var placedObjects by remember { mutableStateOf(0) }
+    var statusMessage by remember { mutableStateOf("Initializing AR...") }
     
-    val imageRecognizer = remember { ImageRecognizer() }
-    val shapeRenderer = remember { Simple3DShapeRenderer() }
-    val cameraExecutor = remember { Executors.newSingleThreadExecutor() }
+    var arRenderer: ARRenderer? by remember { mutableStateOf(null) }
     
     val permissionLauncher = rememberLauncherForActivityResult(
         ActivityResultContracts.RequestPermission()
@@ -60,7 +50,8 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
     
     DisposableEffect(Unit) {
         onDispose {
-            cameraExecutor.shutdown()
+            arRenderer?.onPause()
+            arRenderer?.destroy()
         }
     }
     
@@ -96,127 +87,64 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
                 .background(Color.Black)
         ) {
             if (hasCameraPermission) {
-                // Camera Preview
+                // Pure ARCore GLSurfaceView - clean camera with 3D objects
                 AndroidView(
                     factory = { ctx ->
-                        val previewView = PreviewView(ctx)
-                        val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-                        
-                        cameraProviderFuture.addListener({
-                            val cameraProvider = cameraProviderFuture.get()
+                        GLSurfaceView(ctx).apply {
+                            preserveEGLContextOnPause = true
+                            setEGLContextClientVersion(2)
+                            setEGLConfigChooser(8, 8, 8, 8, 16, 0)
                             
-                            val preview = Preview.Builder().build().also {
-                                it.setSurfaceProvider(previewView.surfaceProvider)
-                            }
-                            
-                            val imageAnalysis = ImageAnalysis.Builder()
-                                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                                .build()
-                                .also {
-                                    it.setAnalyzer(cameraExecutor) { imageProxy ->
-                                        if (isScanning) {
-                                            processImage(imageProxy, imageRecognizer) { shapes ->
-                                                detectedShapes = shapes
-                                            }
-                                        }
-                                        imageProxy.close()
-                                    }
+                            val renderer = ARRenderer(ctx) { planes, objects ->
+                                detectedPlanes = planes
+                                placedObjects = objects
+                                statusMessage = when {
+                                    planes == 0 -> "Move phone slowly to detect surfaces"
+                                    objects == 0 -> "$planes surface${if (planes != 1) "s" else ""} detected - Tap to place shapes"
+                                    else -> "$objects shape${if (objects != 1) "s" else ""} placed"
                                 }
-                            
-                            val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-                            
-                            try {
-                                cameraProvider.unbindAll()
-                                cameraProvider.bindToLifecycle(
-                                    lifecycleOwner,
-                                    cameraSelector,
-                                    preview,
-                                    imageAnalysis
-                                )
-                            } catch (e: Exception) {
-                                Log.e("ARViewScreen", "Camera binding failed", e)
                             }
-                        }, ContextCompat.getMainExecutor(ctx))
-                        
-                        previewView
+                            arRenderer = renderer
+                            
+                            setRenderer(renderer)
+                            renderMode = GLSurfaceView.RENDERMODE_CONTINUOUSLY
+                            
+                            // Handle tap to place objects
+                            setOnTouchListener { _, event ->
+                                if (event.action == android.view.MotionEvent.ACTION_UP) {
+                                    renderer.handleTap(event.x, event.y)
+                                }
+                                true
+                            }
+                        }
+                    },
+                    update = { view ->
+                        view.onResume()
+                        arRenderer?.onResume()
                     },
                     modifier = Modifier.fillMaxSize()
                 )
                 
-                // Overlay with detected shapes
-                Canvas(modifier = Modifier.fillMaxSize()) {
-                    val canvas = drawContext.canvas.nativeCanvas
-                    val width = size.width
-                    val height = size.height
-                    
-                    detectedShapes.forEach { detected ->
-                        val x = detected.x * width
-                        val y = detected.y * height
-                        val shapeSize = detected.width * width * 0.5f
-                        
-                        shapeRenderer.drawShape3D(
-                            canvas,
-                            detected.type,
-                            x,
-                            y,
-                            shapeSize.coerceAtLeast(80f)
-                        )
-                    }
-                }
-                
-                // Info overlay at bottom
-                Column(
+                // Minimal status overlay at bottom
+                Card(
                     modifier = Modifier
                         .align(Alignment.BottomCenter)
                         .padding(24.dp)
-                        .fillMaxWidth()
+                        .fillMaxWidth(),
+                    colors = CardDefaults.cardColors(
+                        containerColor = Color(0xFF6366F1).copy(alpha = 0.9f)
+                    ),
+                    shape = RoundedCornerShape(16.dp),
+                    elevation = CardDefaults.cardElevation(8.dp)
                 ) {
-                    Card(
-                        colors = CardDefaults.cardColors(
-                            containerColor = Color(0xFF6366F1).copy(alpha = 0.95f)
-                        ),
-                        shape = RoundedCornerShape(16.dp),
-                        elevation = CardDefaults.cardElevation(8.dp)
-                    ) {
-                        Column(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .padding(20.dp),
-                            horizontalAlignment = Alignment.CenterHorizontally
-                        ) {
-                            Text(
-                                text = if (detectedShapes.isEmpty()) 
-                                    "Point camera at a flowchart" 
-                                else 
-                                    "Detected ${detectedShapes.size} shape${if (detectedShapes.size != 1) "s" else ""}",
-                                style = MaterialTheme.typography.titleMedium,
-                                color = Color.White,
-                                fontWeight = FontWeight.Bold,
-                                fontSize = 18.sp
-                            )
-                            
-                            if (detectedShapes.isNotEmpty()) {
-                                Spacer(modifier = Modifier.height(8.dp))
-                                Text(
-                                    text = detectedShapes.joinToString(", ") { it.type.displayName },
-                                    style = MaterialTheme.typography.bodyMedium,
-                                    color = Color.White.copy(alpha = 0.9f),
-                                    fontSize = 14.sp
-                                )
-                            }
-                        }
-                    }
-                }
-                
-                // Scanning indicator
-                if (detectedShapes.isEmpty()) {
-                    Box(
-                        modifier = Modifier
-                            .align(Alignment.Center)
-                            .size(250.dp)
-                    ) {
-                        ScanningFrame()
-                    }
+                    Text(
+                        text = statusMessage,
+                        modifier = Modifier.padding(20.dp),
+                        style = MaterialTheme.typography.titleMedium,
+                        color = Color.White,
+                        fontWeight = FontWeight.Bold,
+                        fontSize = 16.sp
+                    )
                 }
                 
             } else {
@@ -228,13 +156,6 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
                     horizontalAlignment = Alignment.CenterHorizontally,
                     verticalArrangement = Arrangement.Center
                 ) {
-                    Icon(
-                        imageVector = Icons.AutoMirrored.Filled.ArrowBack,
-                        contentDescription = null,
-                        modifier = Modifier.size(64.dp),
-                        tint = Color.White.copy(alpha = 0.5f)
-                    )
-                    Spacer(modifier = Modifier.height(24.dp))
                     Text(
                         text = "Camera Permission Required",
                         style = MaterialTheme.typography.headlineSmall,
@@ -243,7 +164,7 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
                     )
                     Spacer(modifier = Modifier.height(16.dp))
                     Text(
-                        text = "Please grant camera permission to scan flowcharts",
+                        text = "Please grant camera permission to use AR",
                         style = MaterialTheme.typography.bodyMedium,
                         color = Color.White.copy(alpha = 0.8f)
                     )
@@ -261,67 +182,5 @@ fun ARViewScreen(onBackPressed: () -> Unit) {
                 }
             }
         }
-    }
-}
-
-@Composable
-fun ScanningFrame() {
-    var animationProgress by remember { mutableStateOf(0f) }
-    
-    LaunchedEffect(Unit) {
-        while (true) {
-            animationProgress = (animationProgress + 0.02f) % 1f
-            delay(16)
-        }
-    }
-    
-    Canvas(modifier = Modifier.fillMaxSize()) {
-        val canvas = drawContext.canvas.nativeCanvas
-        val paint = android.graphics.Paint().apply {
-            color = android.graphics.Color.WHITE
-            style = android.graphics.Paint.Style.STROKE
-            strokeWidth = 8f
-        }
-        
-        val cornerLength = 60f
-        val left = 0f
-        val top = 0f
-        val right = size.width
-        val bottom = size.height
-        
-        // Top-left corner
-        canvas.drawLine(left, top, left + cornerLength, top, paint)
-        canvas.drawLine(left, top, left, top + cornerLength, paint)
-        
-        // Top-right corner
-        canvas.drawLine(right - cornerLength, top, right, top, paint)
-        canvas.drawLine(right, top, right, top + cornerLength, paint)
-        
-        // Bottom-left corner
-        canvas.drawLine(left, bottom - cornerLength, left, bottom, paint)
-        canvas.drawLine(left, bottom, left + cornerLength, bottom, paint)
-        
-        // Bottom-right corner
-        canvas.drawLine(right - cornerLength, bottom, right, bottom, paint)
-        canvas.drawLine(right, bottom - cornerLength, right, bottom, paint)
-        
-        // Scanning line
-        val scanY = top + (bottom - top) * animationProgress
-        paint.alpha = 150
-        canvas.drawLine(left, scanY, right, scanY, paint)
-    }
-}
-
-private fun processImage(
-    imageProxy: ImageProxy,
-    recognizer: ImageRecognizer,
-    onShapesDetected: (List<org.navgurukul.flowchartar.ar.DetectedShape>) -> Unit
-) {
-    try {
-        val bitmap = imageProxy.toBitmap()
-        val shapes = recognizer.detectShapes(bitmap)
-        onShapesDetected(shapes)
-    } catch (e: Exception) {
-        Log.e("ARViewScreen", "Image processing failed", e)
     }
 }
